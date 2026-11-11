@@ -1,21 +1,24 @@
-CC     = gcc
+CC = gcc
 CFLAGS = -Wall -Wextra -g
-TESTS  = tests/test_week1 tests/test_week1_persist
 
-all: libfs.a $(TESTS)
+all: test_week1 test_week1_persist
 
-libfs.a: fs.o disk.o
-	ar rcs libfs.a fs.o disk.o
+test_week1: test_week1.c fs.o disk.o check.h fs.h disk.h
+	$(CC) $(CFLAGS) test_week1.c fs.o disk.o -o test_week1
 
-$(TESTS): %: %.c tests/check.h libfs.a
-	$(CC) $(CFLAGS) $< libfs.a -o $@
+test_week1_persist: test_week1_persist.c fs.o disk.o check.h fs.h disk.h
+	$(CC) $(CFLAGS) test_week1_persist.c fs.o disk.o -o test_week1_persist
+
+fs.o: fs.c fs.h disk.h
+	$(CC) $(CFLAGS) -c fs.c -o fs.o
+
+disk.o: disk.c disk.h
+	$(CC) $(CFLAGS) -c disk.c -o disk.o
 
 test: all
-	./tests/test_week1
-	./tests/test_week1_persist write
-	./tests/test_week1_persist read
+	./test_week1
+	./test_week1_persist write
+	./test_week1_persist read
 
 clean:
-	rm -f *.o libfs.a $(TESTS) *.disk
-
-.PHONY: all test clean
+	rm -f *.o test_week1 test_week1_persist *.disk

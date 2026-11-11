@@ -6,9 +6,9 @@
  */
 #include <stdio.h>
 #include <string.h>
-#include "../fs.h"
-#include "../disk.h"
+#include "disk.h"
 #include "check.h"
+#include "fs.h"
 
 #define DISK "w1persist.disk"
 

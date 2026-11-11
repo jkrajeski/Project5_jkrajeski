@@ -1,9 +1,8 @@
 /* Week 1: make/mount/umount, create/delete/list, limits, free-block count. */
 #include <stdio.h>
-#include <string.h>
-#include "../fs.h"
-#include "../disk.h"
 #include "check.h"
+#include "disk.h"
+#include "fs.h"
 
 #define DISK "t1.disk"
 
