@@ -27,5 +27,5 @@ int fs_truncate(int fildes, off_t length);
 /* Inspection functions */
 int fs_listfiles(char names[][FS_MAX_NAME + 1], int max_names);
 int fs_free_blocks(void);
-
+ 
 #endif

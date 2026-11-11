@@ -58,7 +58,7 @@ static char         mounted_name[256];
 static superblock_t sb;
 static int          fat[DATA_BLOCKS];
 static dir_entry_t  dir[FS_MAX_FILES];
-static fd_t         fdt[FS_MAX_FD];    /* populated starting in week 2 */
+static fd_t         fdt[FS_MAX_FD];    //populated starting in week 2
 
 //helpers
 

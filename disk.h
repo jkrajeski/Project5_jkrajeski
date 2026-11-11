@@ -4,7 +4,7 @@
 /******************************************************************************/
 #define DISK_BLOCKS  8192      /* number of blocks on the disk                */
 #define BLOCK_SIZE   4096      /* block size on "disk"                        */
-
+ 
 /******************************************************************************/
 int make_disk(char *name);     /* create an empty, virtual disk file          */
 int open_disk(char *name);     /* open a virtual disk (file)                  */
