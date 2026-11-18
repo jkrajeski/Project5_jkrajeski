@@ -116,6 +116,12 @@ static int valid_name(const char *name)
     return n >= 1 && n <= FS_MAX_NAME;
 }
 
+//Is fd an open descriptor on a mounted file system?
+static int valid_fd(int fd)
+{
+    return mounted && fd >= 0 && fd < FS_MAX_FD && fdt[fd].in_use;
+}
+
 //Directory index of file `name`, or -1
 static int find_file(const char *name)
 {
@@ -132,6 +138,28 @@ static int find_free_dir_slot(void)
     for (i = 0; i < FS_MAX_FILES; i++)
         if (!dir[i].in_use) return i;
     return -1;
+}
+
+//Take the first free data block, mark it EOF, return its index or -1
+static int alloc_block(void)
+{
+    int i;
+    for (i = 0; i < DATA_BLOCKS; i++) {
+        if (fat[i] == FAT_FREE) {
+            fat[i] = FAT_EOF;
+            return i;
+        }
+    }
+    return -1;
+}
+
+//Block index of the n-th block (0-based) in a chain, or -1
+static int nth_block(int first, long n)
+{
+    int b = first;
+    while (n-- > 0 && b >= 0 && b < DATA_BLOCKS)
+        b = fat[b];
+    return (b >= 0 && b < DATA_BLOCKS) ? b : -1;
 }
 
 //Free every block in the chain starting at `first` (-1 = empty chain)
@@ -239,8 +267,8 @@ int fs_delete(char *name)
     if ((idx = find_file(name)) < 0) return -1;
     if (file_is_open(idx)) return -1;
 
-    free_chain(dir[idx].first_block);        /* blocks back to the free pool */
-    memset(&dir[idx], 0, sizeof(dir[idx]));  /* in_use = 0 */
+    free_chain(dir[idx].first_block);        //blocks back to the free pool
+    memset(&dir[idx], 0, sizeof(dir[idx]));  //in_use = 0
     return 0;
 }
 
@@ -272,23 +300,148 @@ int fs_free_blocks(void)
     return n;
 }
 
+//File descriptor functions
+
 int fs_open(char *name)
-{ (void)name; return -1; }
+{
+    int idx, fd;
+
+    if (!mounted || !valid_name(name)) return -1;
+    if ((idx = find_file(name)) < 0) return -1;
+
+    for (fd = 0; fd < FS_MAX_FD; fd++) {
+        if (!fdt[fd].in_use) {
+            fdt[fd].in_use = 1;
+            fdt[fd].file_idx = idx;
+            fdt[fd].offset = 0;
+            return fd;
+        }
+    }
+    return -1;          //all 32 descriptors in use
+}
 
 int fs_close(int fildes)
-{ (void)fildes; return -1; }
-
-int fs_read(int fildes, void *buf, size_t nbyte)
-{ (void)fildes; (void)buf; (void)nbyte; return -1; }
-
-int fs_write(int fildes, void *buf, size_t nbyte)
-{ (void)fildes; (void)buf; (void)nbyte; return -1; }
+{
+    if (!valid_fd(fildes)) return -1;
+    fdt[fildes].in_use = 0;
+    return 0;
+}
 
 int fs_get_filesize(int fildes)
-{ (void)fildes; return -1; }
+{
+    if (!valid_fd(fildes)) return -1;
+    return dir[fdt[fildes].file_idx].size;
+}
 
 int fs_lseek(int fildes, off_t offset)
-{ (void)fildes; (void)offset; return -1; }
+{
+    if (!valid_fd(fildes)) return -1;
+    if (offset < 0 || offset > dir[fdt[fildes].file_idx].size) return -1;
+    fdt[fildes].offset = offset;
+    return 0;
+}
+
+//Read and write
+
+int fs_read(int fildes, void *buf, size_t nbyte)
+{
+    fd_t *f;
+    dir_entry_t *e;
+    char block[BLOCK_SIZE];
+    size_t done = 0, avail;
+    long off;
+    int blk;
+
+    if (!valid_fd(fildes) || (!buf && nbyte > 0)) return -1;
+    f = &fdt[fildes];
+    e = &dir[f->file_idx];
+    off = (long)f->offset;
+
+    if (off >= e->size || nbyte == 0) return 0;     //at or after end of file
+    avail = (size_t)(e->size - off);
+    if (nbyte > avail) nbyte = avail;
+
+    blk = nth_block(e->first_block, off / BLOCK_SIZE);
+    while (done < nbyte && blk >= 0) {
+        size_t boff  = (size_t)((off + (long)done) % BLOCK_SIZE);
+        size_t chunk = BLOCK_SIZE - boff;
+        if (chunk > nbyte - done) chunk = nbyte - done;
+
+        if (block_read(DATA_START + blk, block) < 0) break;
+        memcpy((char *)buf + done, block + boff, chunk);
+        done += chunk;
+        blk = fat[blk];
+    }
+
+    if (done == 0) return -1;       //only reachable on an I/O or chain error
+    f->offset += (off_t)done;
+    return (int)done;
+}
+
+int fs_write(int fildes, void *buf, size_t nbyte)
+{
+    fd_t *f;
+    dir_entry_t *e;
+    char block[BLOCK_SIZE];
+    long off, size, room, cur_blocks, need_blocks, added = 0, limit;
+    int tail = -1, blk;
+    size_t done = 0;
+
+    if (!valid_fd(fildes) || (!buf && nbyte > 0)) return -1;
+    if (nbyte == 0) return 0;
+
+    f = &fdt[fildes];
+    e = &dir[f->file_idx];
+    off = (long)f->offset;
+    size = e->size;
+
+    //respect the 16 MB maximum file size
+    room = (long)DATA_BLOCKS * BLOCK_SIZE - off;
+    if (room <= 0) return 0;
+    if ((long)nbyte > room) nbyte = (size_t)room;
+
+    //allocate any extra blocks the write will need
+    cur_blocks  = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    need_blocks = (off + (long)nbyte + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if (cur_blocks > 0) {
+        tail = nth_block(e->first_block, cur_blocks - 1);
+        if (tail < 0) return -1;
+    }
+    while (cur_blocks + added < need_blocks) {
+        int nb = alloc_block();
+        if (nb < 0) break;                       //disk is full
+        if (tail < 0) e->first_block = nb;       //first block of the file
+        else          fat[tail] = nb;            //link onto the end of the chain
+        tail = nb;
+        added++;
+    }
+
+    //if we ran out of space, shrink the write to what fits
+    limit = (cur_blocks + added) * BLOCK_SIZE;
+    if (off + (long)nbyte > limit) nbyte = (size_t)(limit - off);
+    if (nbyte == 0) return 0;
+
+    //write the data block by block (read-modify-write for partial blocks)
+    blk = nth_block(e->first_block, off / BLOCK_SIZE);
+    while (done < nbyte && blk >= 0) {
+        size_t boff  = (size_t)((off + (long)done) % BLOCK_SIZE);
+        size_t chunk = BLOCK_SIZE - boff;
+        if (chunk > nbyte - done) chunk = nbyte - done;
+
+        if (chunk < BLOCK_SIZE && block_read(DATA_START + blk, block) < 0)
+            break;
+        memcpy(block + boff, (char *)buf + done, chunk);
+        if (block_write(DATA_START + blk, block) < 0)   //data goes out now
+            break;
+        done += chunk;
+        blk = fat[blk];
+    }
+
+    if (done == 0) return -1;
+    f->offset += (off_t)done;
+    if (f->offset > e->size) e->size = (int)f->offset;
+    return (int)done;
+}
 
 int fs_truncate(int fildes, off_t length)
 { (void)fildes; (void)length; return -1; }
